@@ -66,6 +66,47 @@ jobs:
           "@ | Set-Content dist\MEGASync-Windows\LISEZMOI.txt
           Compress-Archive -Path dist\MEGASync-Windows\* -DestinationPath dist\MEGASync-Windows.zip
 
+      # -------------------------------------------------------
+      # TEST : lancer le .exe et verifier qu'il ne crashe pas
+      # -------------------------------------------------------
+      - name: Lancer le .exe et capturer l'ecran
+        shell: powershell
+        run: |
+          Write-Host "Lancement de MEGASync.exe..."
+          $proc = Start-Process -FilePath "dist\MEGASync-Windows\MEGASync.exe" `
+                                -PassThru -WindowStyle Normal
+
+          # Attendre que la fenetre se charge (10 secondes)
+          Start-Sleep -Seconds 10
+
+          # Verifier que le processus tourne encore
+          if ($proc.HasExited) {
+              Write-Error "ECHEC : L'application a crashe (code $($proc.ExitCode))"
+              exit 1
+          }
+          Write-Host "SUCCES : L'application tourne (PID $($proc.Id))"
+
+          # Capture d'ecran de la fenetre
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $screen  = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bitmap  = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+          $gfx     = [System.Drawing.Graphics]::FromImage($bitmap)
+          $gfx.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+          $bitmap.Save("screenshot_test.png")
+          Write-Host "Capture d'ecran sauvegardee : screenshot_test.png"
+
+          # Fermer proprement
+          $proc.Kill()
+          Write-Host "Application fermee."
+
+      - name: Publier la capture d'ecran
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-test
+          path: screenshot_test.png
+          retention-days: 7
+
       - name: Publier en tant qu'artifact
         uses: actions/upload-artifact@v4
         with:
