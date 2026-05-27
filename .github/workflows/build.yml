@@ -5,6 +5,9 @@ on:
     branches: [master]
   workflow_dispatch:   # Permet de lancer manuellement depuis GitHub
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
