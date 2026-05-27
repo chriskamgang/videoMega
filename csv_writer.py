@@ -32,9 +32,10 @@ def slugify(text):
 
 def get_mega_link(dest_folder, relative_path):
     """Retourne le lien embed MEGA pour un fichier deja uploade."""
+    from sync import _find_rclone
     remote = f"{REMOTE_NAME}:{dest_folder}/{relative_path}"
     r = subprocess.run(
-        ["rclone", "link", remote, "--config", str(RCLONE_CONF)],
+        [_find_rclone(), "link", remote, "--config", str(RCLONE_CONF)],
         capture_output=True, text=True, timeout=30
     )
     link = r.stdout.strip()

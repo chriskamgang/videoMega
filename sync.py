@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -11,6 +12,28 @@ import csv_writer
 REMOTE_NAME  = "mega-sync"
 RCLONE_CONF  = Path.home() / "Documents" / "mega-sync" / "rclone.conf"
 EXCLUDE_DIRS = ["$RECYCLE.BIN/**", "System Volume Information/**", "autorun.inf/**"]
+
+
+def _find_rclone():
+    """Trouve rclone : dans le bundle PyInstaller, a cote de l'exe, ou dans le PATH."""
+    # 1. Bundle PyInstaller (sys._MEIPASS)
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys._MEIPASS) / ("rclone.exe" if sys.platform == "win32" else "rclone")
+        if bundled.exists():
+            return str(bundled)
+        # A cote de l'executable
+        beside = Path(sys.executable).parent / ("rclone.exe" if sys.platform == "win32" else "rclone")
+        if beside.exists():
+            return str(beside)
+    # 2. PATH systeme
+    found = shutil.which("rclone")
+    if found:
+        return found
+    raise RuntimeError(
+        "rclone introuvable.\n"
+        "Mac : brew install rclone\n"
+        "Windows : placez rclone.exe dans le meme dossier que MEGASync.exe"
+    )
 
 
 class SyncManager:
@@ -34,18 +57,11 @@ class SyncManager:
 
     # ------------------------------------------------------------------ setup
     def _ensure_rclone(self):
-        if shutil.which("rclone"):
-            return
-        self.log("Installation de rclone (Homebrew)...")
-        r = subprocess.run(["brew", "install", "rclone"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError("Impossible d'installer rclone.\n"
-                               "Installez-le manuellement : brew install rclone")
-        self.log("rclone installe")
+        self._rclone_bin = _find_rclone()
+        self.log(f"rclone trouve : {self._rclone_bin}")
 
     def _write_config(self):
-        r = subprocess.run(["rclone", "obscure", self.config["mega_password"]],
+        r = subprocess.run([self._rclone_bin, "obscure", self.config["mega_password"]],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError("Erreur chiffrement mot de passe MEGA")
@@ -89,7 +105,7 @@ class SyncManager:
                 self.log(f"--- Synchronisation : {Path(source).name}  ->  MEGA/{dest_base}/{Path(source).name if self.selected_folders else ''}")
 
                 cmd = [
-                    "rclone", "sync", source, dest,
+                    self._rclone_bin, "sync", source, dest,
                     "--config",        str(RCLONE_CONF),
                     "--use-json-log",
                     "--log-level",     "INFO",

@@ -1,0 +1,90 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:   # Permet de lancer manuellement depuis GitHub
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installer les dependances
+        run: |
+          pip install pyinstaller customtkinter win10toast pillow
+
+      - name: Telecharger rclone.exe
+        shell: powershell
+        run: |
+          $url = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile rclone.zip
+          Expand-Archive rclone.zip -DestinationPath rclone_tmp
+          $rclone = Get-ChildItem -Path rclone_tmp -Recurse -Filter rclone.exe | Select-Object -First 1
+          Copy-Item $rclone.FullName -Destination rclone.exe
+          Remove-Item -Recurse rclone_tmp, rclone.zip
+
+      - name: Ajouter rclone dans le spec
+        shell: powershell
+        run: |
+          $spec = Get-Content megasync.spec -Raw
+          $spec = $spec -replace "binaries=\[\]", "binaries=[('rclone.exe', '.')]"
+          Set-Content megasync.spec $spec
+
+      - name: Construire le .exe
+        run: |
+          pyinstaller megasync.spec
+
+      - name: Creer le dossier de distribution
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path dist\MEGASync-Windows -Force
+          Copy-Item dist\MEGASync.exe dist\MEGASync-Windows\MEGASync.exe
+          # Creer un README pour l'utilisateur
+          @"
+          MEGA Sync - Installation Windows
+          =================================
+
+          1. Lancez MEGASync.exe
+          2. Cliquez sur "Parametres" et entrez votre email/mot de passe MEGA
+          3. Branchez votre disque dur
+          4. Selectionnez les dossiers a synchroniser
+          5. Cliquez DEMARRER
+
+          Note : rclone est inclus dans l'executable, aucune installation supplementaire requise.
+          "@ | Set-Content dist\MEGASync-Windows\LISEZMOI.txt
+          Compress-Archive -Path dist\MEGASync-Windows\* -DestinationPath dist\MEGASync-Windows.zip
+
+      - name: Publier en tant qu'artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MEGASync-Windows
+          path: dist/MEGASync-Windows.zip
+          retention-days: 30
+
+      - name: Creer une Release GitHub
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/master'
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "MEGA Sync - Build ${{ github.run_number }}"
+          body: |
+            ## MEGA Sync pour Windows
+
+            ### Installation
+            1. Telechargez `MEGASync-Windows.zip`
+            2. Extrayez le fichier
+            3. Double-cliquez sur `MEGASync.exe`
+
+            **rclone est inclus** - aucune installation supplementaire.
+          files: dist/MEGASync-Windows.zip
+          draft: false
+          prerelease: false
