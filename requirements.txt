@@ -1,1 +1,2 @@
 customtkinter
+win10toast; sys_platform == "win32"
