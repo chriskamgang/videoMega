@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 from pathlib import Path
@@ -6,10 +7,11 @@ import customtkinter as ctk
 
 from config import load_config, save_config
 from sync import SyncManager
-import notifier
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information", "autorun.inf", "__pycache__"}
 
 
 class SettingsWindow(ctk.CTkToplevel):
@@ -51,36 +53,59 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("MEGA Sync")
-        self.geometry("640x580")
+        self.geometry("700x780")
         self.resizable(False, False)
 
-        self.config_data  = load_config()
-        self.sync_manager = None
-        self.sync_thread  = None
-        self._queue       = queue.Queue()
-        self._paused      = False
-        self._running     = False
+        self.config_data   = load_config()
+        self.sync_manager  = None
+        self.sync_thread   = None
+        self._queue        = queue.Queue()
+        self._paused       = False
+        self._running      = False
+        self._folder_vars  = {}   # folder_name -> BooleanVar
 
         self._build_ui()
         self._check_disk()
         self._poll()
 
-    # ------------------------------------------------------------------ build UI
+    # ------------------------------------------------------------------ UI
     def _build_ui(self):
         ctk.CTkLabel(self, text="MEGA Sync",
-                     font=ctk.CTkFont(size=26, weight="bold")).pack(pady=(18, 2))
+                     font=ctk.CTkFont(size=26, weight="bold")).pack(pady=(16, 2))
         ctk.CTkLabel(self, text="Synchronisation intelligente  Disque  ->  MEGA",
                      font=ctk.CTkFont(size=12), text_color="gray").pack()
 
         # Status row
         sf = ctk.CTkFrame(self)
-        sf.pack(fill="x", padx=20, pady=12)
+        sf.pack(fill="x", padx=20, pady=10)
         self.disk_lbl = ctk.CTkLabel(sf, text="Disque : detection...",
                                      font=ctk.CTkFont(size=13))
-        self.disk_lbl.pack(side="left", padx=16, pady=10)
+        self.disk_lbl.pack(side="left", padx=16, pady=8)
         self.mega_lbl = ctk.CTkLabel(sf, text="MEGA : non connecte",
                                      font=ctk.CTkFont(size=13))
-        self.mega_lbl.pack(side="right", padx=16, pady=10)
+        self.mega_lbl.pack(side="right", padx=16, pady=8)
+
+        # ---- Folder selector ----
+        folder_header = ctk.CTkFrame(self, fg_color="transparent")
+        folder_header.pack(fill="x", padx=20, pady=(6, 2))
+
+        ctk.CTkLabel(folder_header, text="Dossiers a synchroniser",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+        ctk.CTkButton(folder_header, text="Tout", width=60, height=26,
+                      command=self._select_all).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(folder_header, text="Aucun", width=60, height=26,
+                      fg_color="gray30", hover_color="gray20",
+                      command=self._select_none).pack(side="right", padx=4)
+
+        self.folder_frame = ctk.CTkScrollableFrame(self, height=180)
+        self.folder_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        self.folder_placeholder = ctk.CTkLabel(
+            self.folder_frame,
+            text="Branchez le disque pour voir les dossiers...",
+            text_color="gray", font=ctk.CTkFont(size=12))
+        self.folder_placeholder.pack(pady=20)
 
         # Stats
         sf2 = ctk.CTkFrame(self)
@@ -92,12 +117,12 @@ class App(ctk.CTk):
         # Progress
         pf = ctk.CTkFrame(self)
         pf.pack(fill="x", padx=20, pady=4)
-        self.pbar = ctk.CTkProgressBar(pf, width=580)
-        self.pbar.pack(pady=(12, 6), padx=16)
+        self.pbar = ctk.CTkProgressBar(pf, width=640)
+        self.pbar.pack(pady=(10, 6), padx=16)
         self.pbar.set(0)
         self.file_lbl = ctk.CTkLabel(pf, text="En attente...",
                                      font=ctk.CTkFont(size=11), text_color="gray",
-                                     wraplength=580)
+                                     wraplength=640)
         self.file_lbl.pack(pady=(0, 10))
 
         # Buttons
@@ -131,16 +156,72 @@ class App(ctk.CTk):
         # Log
         ctk.CTkLabel(self, text="Journal d'activite",
                      font=ctk.CTkFont(size=12)).pack(anchor="w", padx=22)
-        self.log_box = ctk.CTkTextbox(self, height=180,
-                                      font=ctk.CTkFont(size=11, family="Courier New"))
-        self.log_box.pack(fill="both", expand=True, padx=20, pady=(4, 18))
+        self.log_box = ctk.CTkTextbox(
+            self, height=160, font=ctk.CTkFont(size=11, family="Courier New"))
+        self.log_box.pack(fill="both", expand=True, padx=20, pady=(4, 16))
         self.log_box.configure(state="disabled")
+
+    # ------------------------------------------------------------------ folder browser
+    def _scan_folders(self, source_path):
+        """Scanne les dossiers de premier niveau du disque (thread background)."""
+        src = Path(source_path)
+        folders = []
+        try:
+            for item in sorted(src.iterdir()):
+                if item.is_dir() and item.name not in SKIP_DIRS:
+                    folders.append(item.name)
+        except PermissionError:
+            pass
+        self._queue.put({"action": "folders_loaded", "folders": folders})
+
+    def _populate_folders(self, folders):
+        """Affiche les checkboxes dans le folder_frame."""
+        # Vider le frame
+        for w in self.folder_frame.winfo_children():
+            w.destroy()
+        self._folder_vars.clear()
+
+        if not folders:
+            ctk.CTkLabel(self.folder_frame,
+                         text="Aucun dossier trouve (verifiez les permissions disque)",
+                         text_color="orange").pack(pady=10)
+            return
+
+        # Grille 2 colonnes
+        for i, name in enumerate(folders):
+            var = ctk.BooleanVar(value=True)
+            self._folder_vars[name] = var
+            cb = ctk.CTkCheckBox(
+                self.folder_frame, text=name, variable=var,
+                font=ctk.CTkFont(size=12), checkbox_width=18, checkbox_height=18)
+            cb.grid(row=i // 2, column=i % 2, sticky="w", padx=12, pady=3)
+
+    def _select_all(self):
+        for var in self._folder_vars.values():
+            var.set(True)
+
+    def _select_none(self):
+        for var in self._folder_vars.values():
+            var.set(False)
+
+    def _get_selected_folders(self):
+        selected = [name for name, var in self._folder_vars.items() if var.get()]
+        # Si tout est selectionne ou rien de selectionne -> sync complet
+        if not selected or len(selected) == len(self._folder_vars):
+            return None
+        return selected
 
     # ------------------------------------------------------------------ helpers
     def _check_disk(self):
         src = Path(self.config_data["source_path"])
         if src.exists():
-            self.disk_lbl.configure(text="Disque : TOSHIBA EXT detecte")
+            self.disk_lbl.configure(text=f"Disque : detecte")
+            # Scan des dossiers en arriere-plan
+            threading.Thread(
+                target=self._scan_folders,
+                args=(self.config_data["source_path"],),
+                daemon=True
+            ).start()
         else:
             self.disk_lbl.configure(text="Disque : non detecte")
 
@@ -164,6 +245,8 @@ class App(ctk.CTk):
                     self.mega_lbl.configure(text="MEGA : connecte")
                 elif act == "complete":
                     self._on_complete(ev["data"])
+                elif act == "folders_loaded":
+                    self._populate_folders(ev["folders"])
         except queue.Empty:
             pass
         self.after(100, self._poll)
@@ -175,7 +258,7 @@ class App(ctk.CTk):
             self.stats_lbl.configure(
                 text=f"{done} / {total} fichiers synchronises  ({pct}%)")
         if fname:
-            short = fname if len(fname) < 82 else "..." + fname[-79:]
+            short = fname if len(fname) < 85 else "..." + fname[-82:]
             self.file_lbl.configure(text=f"Upload : {short}")
 
     def _on_complete(self, data):
@@ -184,8 +267,8 @@ class App(ctk.CTk):
         self.btn_start.configure(state="normal", text="DEMARRER")
         self.btn_pause.configure(state="disabled", text="PAUSE")
         self.btn_stop.configure(state="disabled")
-        status = "Termine !" if data.get("ok") else "Termine avec erreurs."
-        self.file_lbl.configure(text=status)
+        self.file_lbl.configure(
+            text="Termine !" if data.get("ok") else "Termine avec erreurs.")
         self._check_disk()
 
     # ------------------------------------------------------------------ controls
@@ -201,6 +284,12 @@ class App(ctk.CTk):
             self._append_log(f"Disque non detecte : {src}")
             return
 
+        selected = self._get_selected_folders()
+        if selected:
+            self._append_log(f"Dossiers selectionnes : {', '.join(selected)}")
+        else:
+            self._append_log("Synchronisation complete du disque")
+
         self._running = True
         self._paused  = False
         self.btn_start.configure(state="disabled", text="En cours...")
@@ -213,6 +302,7 @@ class App(ctk.CTk):
 
         self.sync_manager = SyncManager(
             config=self.config_data,
+            selected_folders=selected,
             on_progress=lambda f, d, t: q("progress", file=f, done=d, total=t),
             on_log=lambda msg: q("log", msg=msg),
             on_complete=lambda data: q("complete", data=data),
@@ -225,16 +315,14 @@ class App(ctk.CTk):
         if not self.sync_manager:
             return
         if not self._paused:
-            # Pause = stop rclone (rclone already saved state on MEGA)
             self.sync_manager.stop()
-            self._paused = True
+            self._paused  = True
             self._running = False
             self.btn_pause.configure(text="REPRENDRE")
             self.btn_start.configure(state="normal", text="DEMARRER")
             self.btn_stop.configure(state="disabled")
             self.file_lbl.configure(text="En pause - progression sauvegardee sur MEGA")
         else:
-            # Resume = restart sync (rclone will skip already-uploaded files)
             self._paused = False
             self._on_start()
 
