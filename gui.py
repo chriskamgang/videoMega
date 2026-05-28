@@ -2,6 +2,7 @@ import os
 import queue
 import threading
 from pathlib import Path
+from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -24,23 +25,51 @@ class SettingsWindow(ctk.CTkToplevel):
         self.on_save = on_save
         self.cfg = config.copy()
 
-        fields = [
-            ("Email MEGA",                    "mega_email",       False),
-            ("Mot de passe MEGA",             "mega_password",    True),
-            ("Dossier source (disque)",       "source_path",      False),
-            ("Dossier destination sur MEGA",  "mega_dest_folder", False),
-        ]
         self._vars = {}
-        for label, key, secret in fields:
-            ctk.CTkLabel(self, text=label, font=ctk.CTkFont(size=13)).pack(
-                anchor="w", padx=30, pady=(10, 0))
-            var = ctk.StringVar(value=config.get(key, ""))
-            self._vars[key] = var
-            ctk.CTkEntry(self, textvariable=var, width=400,
-                         show="*" if secret else "").pack(padx=30)
+
+        # Email
+        ctk.CTkLabel(self, text="Email MEGA", font=ctk.CTkFont(size=13)).pack(
+            anchor="w", padx=30, pady=(10, 0))
+        var_email = ctk.StringVar(value=config.get("mega_email", ""))
+        self._vars["mega_email"] = var_email
+        ctk.CTkEntry(self, textvariable=var_email, width=400).pack(padx=30)
+
+        # Mot de passe
+        ctk.CTkLabel(self, text="Mot de passe MEGA", font=ctk.CTkFont(size=13)).pack(
+            anchor="w", padx=30, pady=(10, 0))
+        var_pwd = ctk.StringVar(value=config.get("mega_password", ""))
+        self._vars["mega_password"] = var_pwd
+        ctk.CTkEntry(self, textvariable=var_pwd, width=400, show="*").pack(padx=30)
+
+        # Dossier source avec bouton Parcourir
+        ctk.CTkLabel(self, text="Dossier source (disque / cle USB)",
+                     font=ctk.CTkFont(size=13)).pack(anchor="w", padx=30, pady=(10, 0))
+        var_src = ctk.StringVar(value=config.get("source_path", ""))
+        self._vars["source_path"] = var_src
+        src_row = ctk.CTkFrame(self, fg_color="transparent")
+        src_row.pack(padx=30, fill="x")
+        ctk.CTkEntry(src_row, textvariable=var_src, width=300).pack(side="left")
+        ctk.CTkButton(src_row, text="Parcourir", width=90,
+                      command=lambda: self._browse(var_src)).pack(side="left", padx=(8, 0))
+
+        # Dossier destination MEGA
+        ctk.CTkLabel(self, text="Dossier destination sur MEGA",
+                     font=ctk.CTkFont(size=13)).pack(anchor="w", padx=30, pady=(10, 0))
+        var_dest = ctk.StringVar(value=config.get("mega_dest_folder", ""))
+        self._vars["mega_dest_folder"] = var_dest
+        ctk.CTkEntry(self, textvariable=var_dest, width=400).pack(padx=30)
 
         ctk.CTkButton(self, text="Enregistrer", width=160,
                       command=self._save).pack(pady=20)
+
+    def _browse(self, var):
+        """Ouvre un explorateur de fichiers pour choisir le dossier source."""
+        path = filedialog.askdirectory(
+            title="Choisir le dossier source (disque / cle USB)",
+            initialdir=var.get() or "/"
+        )
+        if path:
+            var.set(path)
 
     def _save(self):
         for key, var in self._vars.items():
@@ -84,6 +113,9 @@ class App(ctk.CTk):
         self.mega_lbl = ctk.CTkLabel(sf, text="MEGA : non connecte",
                                      font=ctk.CTkFont(size=13))
         self.mega_lbl.pack(side="right", padx=16, pady=8)
+        ctk.CTkButton(sf, text="Actualiser", width=90, height=28,
+                      fg_color="gray30", hover_color="gray20",
+                      command=self._refresh_source).pack(side="right", padx=8, pady=8)
 
         # ---- Folder selector ----
         folder_header = ctk.CTkFrame(self, fg_color="transparent")
@@ -215,8 +247,7 @@ class App(ctk.CTk):
     def _check_disk(self):
         src = Path(self.config_data["source_path"])
         if src.exists():
-            self.disk_lbl.configure(text=f"Disque : detecte")
-            # Scan des dossiers en arriere-plan
+            self.disk_lbl.configure(text=f"Disque : {src.name}")
             threading.Thread(
                 target=self._scan_folders,
                 args=(self.config_data["source_path"],),
@@ -224,6 +255,26 @@ class App(ctk.CTk):
             ).start()
         else:
             self.disk_lbl.configure(text="Disque : non detecte")
+            for w in self.folder_frame.winfo_children():
+                w.destroy()
+            self._folder_vars.clear()
+            ctk.CTkLabel(
+                self.folder_frame,
+                text="Branchez le disque / la cle USB puis cliquez Actualiser",
+                text_color="gray", font=ctk.CTkFont(size=12)
+            ).pack(pady=20)
+
+    def _refresh_source(self):
+        """Ouvre un explorateur pour choisir la source, ou rescanne la source actuelle."""
+        path = filedialog.askdirectory(
+            title="Choisir le disque ou la cle USB a synchroniser",
+            initialdir=self.config_data.get("source_path") or "/"
+        )
+        if path:
+            self.config_data["source_path"] = path
+            save_config(self.config_data)
+            self._append_log(f"Source changee : {path}")
+        self._check_disk()
 
     def _append_log(self, msg):
         self.log_box.configure(state="normal")
